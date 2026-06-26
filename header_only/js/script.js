@@ -2237,6 +2237,102 @@ function initZoomHoverGuard() {
   }
 }
 
+/* ============================================================
+   Компенсация режима Firefox «Только текст».
+   В этом режиме браузер увеличивает ТОЛЬКО размер шрифта (font-size), не
+   трогая раскладку (vw/px-боксы). Из-за этого реальный текст (ячейки таблицы,
+   подписи радиокнопок/чекбоксов и т.п.) вылезал за свои боксы и статичный
+   дизайн рушился.
+   Решение: невидимым пробником измеряем фактический коэффициент текстового
+   зума и записываем обратную величину в --text-zoom-inv. Все размеры шрифта
+   на странице заданы через --fpx = --px * var(--text-zoom-inv), поэтому
+   указанный font-size делится на коэффициент, а браузер тут же умножает его
+   на тот же коэффициент — итог: текст сохраняет исходный размер.
+   Полный масштаб (ctrl +/-) на пробник не влияет (он меряется в CSS-px,
+   инвариантных к full-zoom), поэтому --text-zoom-inv остаётся 1 и обычное
+   масштабирование работает как прежде. ============================================================ */
+let textZoomProbeEl = null;
+let textZoomBaseline = 0;
+
+function ensureTextZoomProbe() {
+  if (textZoomProbeEl) return textZoomProbeEl;
+  if (!document.body) return null;
+  const el = document.createElement("span");
+  el.setAttribute("aria-hidden", "true");
+  el.textContent = "MMMMMMMMMMMMMMMM";
+  el.style.cssText =
+    "position:absolute!important;left:-99999px!important;top:0!important;" +
+    "visibility:hidden!important;white-space:pre!important;pointer-events:none!important;" +
+    "margin:0!important;padding:0!important;border:0!important;" +
+    "font-family:Roboto,Arial,sans-serif!important;font-weight:400!important;" +
+    "line-height:1!important;font-size:1000px!important;";
+  document.body.appendChild(el);
+  textZoomProbeEl = el;
+  return el;
+}
+
+function measureTextZoom() {
+  const el = ensureTextZoomProbe();
+  if (!el) return;
+  const w = el.getBoundingClientRect().width;
+  if (!(w > 0)) return;
+  if (!(textZoomBaseline > 0)) {
+    // Базовая ширина при текстовом зуме = 100% (момент загрузки страницы).
+    textZoomBaseline = w;
+  }
+  let factor = w / textZoomBaseline;
+  if (!isFinite(factor) || factor <= 0) factor = 1;
+  // Сглаживаем микро-погрешности измерения около 1.
+  if (Math.abs(factor - 1) < 0.01) factor = 1;
+  const inv = (1 / factor).toFixed(5);
+  const root = document.documentElement;
+  if (root.style.getPropertyValue("--text-zoom-inv") !== inv) {
+    root.style.setProperty("--text-zoom-inv", inv);
+  }
+}
+
+function scheduleTextZoomMeasure() {
+  measureTextZoom();
+  window.requestAnimationFrame(measureTextZoom);
+}
+
+let textZoomWatchBound = false;
+
+function initTextZoomCompensation() {
+  if (textZoomWatchBound) return;
+  textZoomWatchBound = true;
+  measureTextZoom();
+  // Текстовый зум (ctrl +/- в режиме «Только текст») не шлёт resize, поэтому
+  // меряем по тем же сигналам ввода, что и защита от подсказок, + лёгкий
+  // интервал-страховка на случай изменения масштаба через меню браузера.
+  window.addEventListener(
+    "wheel",
+    function (e) {
+      if (e.ctrlKey) scheduleTextZoomMeasure();
+    },
+    { capture: true, passive: true },
+  );
+  window.addEventListener(
+    "keydown",
+    function (e) {
+      if (e.ctrlKey || e.metaKey) scheduleTextZoomMeasure();
+    },
+    true,
+  );
+  window.addEventListener("resize", scheduleTextZoomMeasure);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", scheduleTextZoomMeasure);
+  }
+  window.setInterval(measureTextZoom, 200);
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(function () {
+      // Шрифт мог ещё не загрузиться на момент первого замера — обновим базу.
+      textZoomBaseline = 0;
+      measureTextZoom();
+    });
+  }
+}
+
 function areTooltipsSuppressed() {
   return document.documentElement.classList.contains("is-zoom-hover-blocked");
 }
@@ -7333,6 +7429,7 @@ document.addEventListener("DOMContentLoaded", function () {
   }
   updateZoomAwareLines();
   initZoomHoverGuard();
+  initTextZoomCompensation();
   bindBitmapTextFontRefresh();
   initNavTabs();
   initCustomSelect();
